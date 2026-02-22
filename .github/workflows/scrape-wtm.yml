@@ -1,30 +1,4 @@
-name: Scrape WherestheMatch (WTM) -> HTML
-
-on:
-  workflow_dispatch:
-    inputs:
-      start:
-        description: "Start date (YYYYMMDD)"
-        required: true
-        default: "20260222"
-      end:
-        description: "End date (YYYYMMDD)"
-        required: true
-        default: "20260301"
-  schedule:
-    - cron: "10 1 * * *" # daily 01:10 UTC
-
-permissions:
-  contents: write
-
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-
-    env:
-      WEBAPP_URL: ${{ secrets.WEBAPP_URL }}
-
-    steps:
+steps:
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -32,9 +6,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: 'npm' # Mengaktifkan cache agar proses lebih cepat
 
       - name: Install deps
-        run: npm ci
+        # Mengganti 'npm ci' menjadi 'npm install' agar lockfile diperbarui otomatis
+        run: npm install 
 
       - name: Determine date range
         id: range
@@ -56,6 +32,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add out/*.html results.csv || true
+          # Menambahkan package.json dan package-lock.json agar tersinkronisasi di repo
+          git add out/*.html results.csv package.json package-lock.json || true
           git commit -m "wtm: update ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
           git push
