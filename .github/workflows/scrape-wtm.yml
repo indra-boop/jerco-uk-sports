@@ -1,0 +1,57 @@
+name: Scrape WherestheMatch (WTM) -> HTML
+
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Start date (YYYYMMDD)"
+        required: true
+        default: "20260222"
+      end:
+        description: "End date (YYYYMMDD)"
+        required: true
+        default: "20260301"
+  schedule:
+    - cron: "10 1 * * *" # daily 01:10 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Determine date range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "start=${{ inputs.start }}" >> $GITHUB_OUTPUT
+            echo "end=${{ inputs.end }}" >> $GITHUB_OUTPUT
+          else
+            start=$(date -u +"%Y%m%d")
+            end=$(date -u -d "+7 days" +"%Y%m%d")
+            echo "start=$start" >> $GITHUB_OUTPUT
+            echo "end=$end" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run scraper
+        run: node src/scrape-wtm.js ${{ steps.range.outputs.start }} ${{ steps.range.outputs.end }}
+
+      - name: Commit output
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add out/*.html || true
+          git commit -m "wtm: update ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
+          git push
