@@ -7,7 +7,10 @@ const fs = require("fs");
  * - kolom GMT dihilangkan
  * - kolom "day" dihapus
  * - hari/tanggal/time = WITA (Asia/Makassar)
+ * - tanggal format: dd-mm-yyyy
  * - jika channel > 1 dipisah ke channel_1..channel_8
+ * - urutan kolom CSV mengikuti contoh:
+ *   hari, tanggal, time, sport, competition, title, home, away, channel_1..channel_8, event_url
  * - tetap simpan raw HTML ke /out untuk audit
  * - optional POST ke Google Apps Script via WEBAPP_URL
  */
@@ -44,14 +47,14 @@ function buildUrl(startYYYYMMDD, endYYYYMMDD) {
  * Convert ISO Z time (UTC) -> WITA parts
  * output:
  * - hari: "Minggu", "Senin", ...
- * - tanggal: YYYY-MM-DD
+ * - tanggal: dd-mm-yyyy
  * - time: HH:MM
  */
 function isoToWitaPartsISO(isoZ) {
   const dt = new Date(isoZ);
   if (Number.isNaN(dt.getTime())) return null;
 
-  // tanggal + jam WITA
+  // dd, mm, yyyy, HH, MM by timezone Asia/Makassar
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Makassar",
     year: "numeric",
@@ -69,10 +72,10 @@ function isoToWitaPartsISO(isoZ) {
   const HH = get("hour");
   const MM = get("minute");
 
-  const tanggal = `${yyyy}-${mm}-${dd}`;
+  // ✅ format sesuai request
+  const tanggal = `${dd}-${mm}-${yyyy}`; // dd-mm-yyyy
   const time = `${HH}:${MM}`;
 
-  // hari WITA (id-ID)
   const hari = new Intl.DateTimeFormat("id-ID", {
     timeZone: "Asia/Makassar",
     weekday: "long",
@@ -134,7 +137,7 @@ function parseWTMEvents($) {
         if (metaIso) isoZ = metaIso.trim();
       }
 
-      // fallback terakhir: kalau bener2 gak ada ISO, ambil span.time/span.date (tanpa convert)
+      // hasil WITA
       let hari = "";
       let tanggal = "";
       let time = "";
@@ -147,11 +150,9 @@ function parseWTMEvents($) {
           time = w.time;
         }
       } else if ($st) {
-        // kalau cuma ada text (kurang akurat timezone), tetap isi minimal
+        // fallback: tanpa ISO (kurang akurat timezone)
         time = $st.find("span.time").text().trim() || "";
-        // date text di WTM kadang "Wed 25th February 2026" -> biarin apa adanya kalau ISO kosong
         tanggal = $st.find("span.date").text().trim() || "";
-        // hari tidak bisa dipastikan tanpa ISO
         hari = "";
       }
 
@@ -180,9 +181,9 @@ function parseWTMEvents($) {
         time,
         sport,
         competition,
+        title: home && away ? `${home} vs ${away}` : matchContent, // ✅ title sebelum home/away
         home,
         away,
-        title: home && away ? `${home} vs ${away}` : matchContent,
         ...channelCols,
         event_url,
       });
@@ -262,12 +263,12 @@ function dedupeRows(rows) {
     console.warn("Warning: no rows scraped. Check site layout / blocking.");
   }
 
-  // CSV output (WITA)
+  // CSV output (WITA) - ✅ urutan kolom sesuai contoh
   let csv =
-    "hari,tanggal,time,sport,competition,home,away,title,channel_1,channel_2,channel_3,channel_4,channel_5,channel_6,channel_7,channel_8,event_url\n";
+    "hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,channel_3,channel_4,channel_5,channel_6,channel_7,channel_8,event_url\n";
 
   for (const r of rows) {
-    csv += `"${safeCsv(r.hari)}","${safeCsv(r.tanggal)}","${safeCsv(r.time)}","${safeCsv(r.sport)}","${safeCsv(r.competition)}","${safeCsv(r.home)}","${safeCsv(r.away)}","${safeCsv(r.title)}","${safeCsv(r.channel_1)}","${safeCsv(r.channel_2)}","${safeCsv(r.channel_3)}","${safeCsv(r.channel_4)}","${safeCsv(r.channel_5)}","${safeCsv(r.channel_6)}","${safeCsv(r.channel_7)}","${safeCsv(r.channel_8)}","${safeCsv(r.event_url)}"\n`;
+    csv += `"${safeCsv(r.hari)}","${safeCsv(r.tanggal)}","${safeCsv(r.time)}","${safeCsv(r.sport)}","${safeCsv(r.competition)}","${safeCsv(r.title)}","${safeCsv(r.home)}","${safeCsv(r.away)}","${safeCsv(r.channel_1)}","${safeCsv(r.channel_2)}","${safeCsv(r.channel_3)}","${safeCsv(r.channel_4)}","${safeCsv(r.channel_5)}","${safeCsv(r.channel_6)}","${safeCsv(r.channel_7)}","${safeCsv(r.channel_8)}","${safeCsv(r.event_url)}"\n`;
   }
 
   const csvPath = `${process.cwd()}/results.csv`;
