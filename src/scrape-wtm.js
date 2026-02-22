@@ -50,7 +50,6 @@ function isoToWitaPartsISO(isoZ) {
 /* =========================
    CORE LOGIC
    ========================= */
-
 function extractHiddenFields($) {
   const fields = {};
   $("input[type='hidden']").each((_, el) => {
@@ -61,7 +60,6 @@ function extractHiddenFields($) {
   return fields;
 }
 
-// Menambahkan parameter 'pageNum' untuk melacak sumber halaman
 function parseWTMEvents($, pageNum) {
   const rows = [];
   $("table tr").each((_, tr) => {
@@ -90,7 +88,7 @@ function parseWTMEvents($, pageNum) {
     const event_url = $fx.find("a[href*='/match/']").attr("href");
 
     rows.push({
-      page: pageNum, // Data halaman dimasukkan di sini
+      page: pageNum,
       hari, tanggal, time, sport, competition,
       title: home && away ? `${home} vs ${away}` : matchContent,
       home, away,
@@ -116,14 +114,13 @@ async function scrape() {
   let allData = [];
   let currentPageHtml = "";
 
-  // --- PAGE 1 (GET) ---
   console.log(`Fetching Page 1: ${urlBase}`);
   const res1 = await client.get(urlBase);
   currentPageHtml = res1.data;
   fs.writeFileSync(`./out/page-1.html`, currentPageHtml);
 
   const $1 = cheerio.load(currentPageHtml);
-  const p1Data = parseWTMEvents($1, 1); // Penanda Halaman 1
+  const p1Data = parseWTMEvents($1, 1);
   allData.push(...p1Data);
   console.log(`Page 1 done. Found: ${p1Data.length} items.`);
 
@@ -131,10 +128,9 @@ async function scrape() {
   const totalPages = pageMatches.length > 0 ? Math.max(...pageMatches.map(m => parseInt(m[1]))) + 1 : 1;
   console.log(`Total pages detected: ${totalPages}`);
 
-  // --- NEXT PAGES (POST) ---
   for (let p = 1; p < totalPages; p++) {
-    const pageDisplay = p + 1;
-    console.log(`Fetching Page ${pageDisplay}/${totalPages}...`);
+    const pageNum = p + 1;
+    console.log(`Fetching Page ${pageNum}/${totalPages}...`);
     
     const $prev = cheerio.load(currentPageHtml);
     const hiddenFields = extractHiddenFields($prev);
@@ -154,28 +150,22 @@ async function scrape() {
       });
 
       currentPageHtml = resNext.data;
-      fs.writeFileSync(`./out/page-${pageDisplay}.html`, currentPageHtml);
+      fs.writeFileSync(`./out/page-${pageNum}.html`, currentPageHtml);
 
       const $next = cheerio.load(currentPageHtml);
-      const pNextData = parseWTMEvents($next, pageDisplay); // Penanda Halaman berikutnya
+      const pNextData = parseWTMEvents($next, pageNum);
       
-      if (pNextData.length === 0) {
-        console.warn(`No data found on page ${pageDisplay}. Stopping.`);
-        break;
-      }
+      if (pNextData.length === 0) break;
 
       allData.push(...pNextData);
-      console.log(`Page ${pageDisplay} done. Found: ${pNextData.length} items.`);
-      
+      console.log(`Page ${pageNum} done. Found: ${pNextData.length} items.`);
       await new Promise(r => setTimeout(r, 2000));
     } catch (err) {
-      console.error(`Error on page ${pageDisplay}:`, err.message);
+      console.error(`Error on page ${pageNum}:`, err.message);
       break;
     }
   }
 
-  // --- SAVE CSV ---
-  // Menambahkan kolom 'page' di header CSV
   let csv = "page,hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,event_url\n";
   allData.forEach(r => {
     csv += `"${safeCsv(r.page)}","${safeCsv(r.hari)}","${safeCsv(r.tanggal)}","${safeCsv(r.time)}","${safeCsv(r.sport)}","${safeCsv(r.competition)}","${safeCsv(r.title)}","${safeCsv(r.home)}","${safeCsv(r.away)}","${safeCsv(r.channels[0])}","${safeCsv(r.channels[1])}","${safeCsv(r.event_url)}"\n`;
