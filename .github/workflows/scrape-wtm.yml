@@ -57,14 +57,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 1. Tambahkan hasil terbaru ke area staging
-          git add results.csv out/*.html package.json package-lock.json || true
+          # Paksa Git untuk mengenali perubahan file
+          git add results.csv out/*.html package-lock.json || true
           
-          # 2. Lakukan COMMIT lokal sebelum menarik perubahan dari server
-          git commit -m "wtm: update data ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
+          # Lakukan commit
+          git commit -m "Update data: Mencakup Halaman 3 (Total 423 items)" || echo "No changes detected"
           
-          # 3. Sinkronkan dengan server menggunakan rebase untuk menghindari konflik
+          # Ambil perubahan terbaru dan gabungkan hasil scrape di atasnya
           git pull --rebase origin main
           
-          # 4. Unggah hasil ke GitHub
+          # Kirim ke GitHub
           git push origin main
