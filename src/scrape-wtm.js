@@ -185,52 +185,85 @@ function extractChannels($, $block) {
 function parseWTMEvents($) {
   const rows = [];
 
-  $("td.fixture-details").each((_, td) => {
-    const $fixture = $(td);
-    const $row = $fixture.closest("tr");
+  $("table tr").each((_, tr) => {
+    const $tr = $(tr);
 
-    const matchContent = $fixture.attr("content") || "";
-    const teams = matchContent.split(" v ");
+    const fixtures = $tr.find("td.fixture-details").toArray();
+    const starts = $tr.find("td.start-details, td.start-date-time").toArray(); // fallback class lama
+    const channels = $tr.find("td.channel-details").toArray();
 
-    const home = teams[0] ? teams[0].replace(/-/g, " ").trim() : "";
-    const away = teams[1] ? teams[1].replace(/-/g, " ").trim() : "";
+    if (fixtures.length === 0) return;
 
-    // tanggal & waktu
-    const dateText = $row.find("td.start-date-time span.date").text().trim();
-    const time = $row.find("td.start-date-time span.time").text().trim();
+    for (let i = 0; i < fixtures.length; i++) {
+      const $fx = $(fixtures[i]);
+      const $st = starts[i] ? $(starts[i]) : null;
+      const $ch = channels[i] ? $(channels[i]) : null;
 
-    // sport
-    const sport =
-      $row.find("td.competition-name img").attr("alt") || "";
+      // teams dari content="India v South-Africa"
+      const matchContent = ($fx.attr("content") || "").trim();
+      const parts = matchContent.split(" v ");
+      const home = parts[0] ? parts[0].replace(/-/g, " ").trim() : "";
+      const away = parts[1] ? parts[1].replace(/-/g, " ").trim() : "";
 
-    // competition
-    const competition =
-      $row.find("td.competition-name a").first().text().trim();
+      // sport + competition ada di dalam fixture-details (lihat HTML lu)
+      const sport = $fx.find(".fixture-sport img").attr("alt")?.trim() || "";
+      const competition = $fx.find(".fixture-comp a").first().text().trim() || "";
 
-    // channels
-    const channels = [];
-    $row.find("td.channel-details img").each((_, img) => {
-      let t = $(img).attr("title") || $(img).attr("alt") || "";
-      t = t.replace(/Live on\s*/i, "").trim();
-      if (t) channels.push(t);
-    });
+      // date/time: ambil dari start-details
+      let tanggal = "";
+      let time_gmt = "";
 
-    rows.push({
-      day: "range",
-      tanggal: dateText,
-      time_gmt: time,
-      sport,
-      competition,
-      home,
-      away,
-      title: `${home} vs ${away}`,
-      channels: channels.join(" | "),
-      event_url: ""
-    });
+      if ($st) {
+        time_gmt = $st.find("span.time").text().trim() || "";
+        tanggal = $st.find("span.date").text().trim() || "";
+
+        // fallback ke attribute content ISO
+        const iso = $st.attr("content");
+        if ((!tanggal || !time_gmt) && iso) {
+          // contoh: 2026-02-25T13:30:00Z
+          // kita ambil date/time raw dari ISO (GMT)
+          const m = iso.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+          if (m) {
+            if (!time_gmt) time_gmt = m[2];
+            if (!tanggal) tanggal = m[1];
+          }
+        }
+      }
+
+      // channels: img title/alt di channel-details
+      const channelList = [];
+      if ($ch) {
+        $ch.find("img").each((_, img) => {
+          let t = $(img).attr("title") || $(img).attr("alt") || "";
+          t = t.replace(/Live on\s*/i, "").replace(/\s*logo\s*$/i, "").trim();
+          if (t) channelList.push(t);
+        });
+      }
+
+      // event_url: link match kalau ada
+      let event_url = "";
+      const href = $fx.find("a.mobile-buy-pass, a[href*='/match/']").first().attr("href");
+      if (href) event_url = href.startsWith("http") ? href : `https://www.wheresthematch.com${href}`;
+
+      rows.push({
+        day: "range",
+        tanggal,
+        time_gmt,
+        sport,
+        competition,
+        home,
+        away,
+        title: home && away ? `${home} vs ${away}` : matchContent,
+        channels: channelList.join(" | "),
+        event_url
+      });
+    }
   });
 
   return rows;
 }
+
+
 /* =========================
    DEDUPE
    ========================= */
