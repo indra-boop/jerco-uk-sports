@@ -58,12 +58,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Simpan hasil scrape sementara agar pull tidak error
+          # 1. Tambahkan semua perubahan ke area 'stage' terlebih dahulu
           git add out/*.html results.csv package.json package-lock.json || true
           
-          # Tarik perubahan terbaru dari GitHub
+          # 2. Lakukan commit lokal sebelum menarik perubahan dari server
+          git commit -m "wtm: update ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
+          
+          # 3. Tarik perubahan terbaru dari server dengan rebase
+          # Strategi ini menggabungkan commit lokal Anda di atas perubahan server
           git pull --rebase origin main
           
-          # Commit dan push
-          git commit -m "wtm: update ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
+          # 4. Push ke repositori utama
           git push origin main
