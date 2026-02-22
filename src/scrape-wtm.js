@@ -182,84 +182,51 @@ function extractChannels($, $block) {
     .filter(Boolean);
 }
 
-function parseWTMEvents($, startYYYYMMDD) {
+function parseWTMEvents($) {
   const rows = [];
 
-  const startDate = parseYmd(startYYYYMMDD);
-  const defaultYear = startDate.getUTCFullYear();
+  $("td.fixture-details").each((_, td) => {
+    const $td = $(td);
+    const $row = $td.closest("tr");
 
-  // kandidat elemen yang “event-like”
-  const candidates = $("li, div, article, section, p")
-    .filter((_, el) => looksLikeEventBlock($(el).text()))
-    .toArray();
+    const matchContent = $td.attr("content") || "";
+    const teams = matchContent.split(" v ");
 
-  // filter: ambil leaf block (biar gak dobel nested)
-  const blocks = candidates.filter(el => {
-    const $el = $(el);
-    const childHasEvent = $el.find("li, div, p").toArray()
-      .some(ch => looksLikeEventBlock($(ch).text()));
-    return !childHasEvent;
-  });
+    const home = teams[0] ? teams[0].replace(/-/g, " ").trim() : "";
+    const away = teams[1] ? teams[1].replace(/-/g, " ").trim() : "";
 
-  for (const el of blocks) {
-    const $block = $(el);
-    const text = clean($block.text());
-    const time_gmt = extractTimeFromText(text);
-    if (!time_gmt) continue;
+    const time = $row.find("td.start-date-time span.time").text().trim();
+    const dateText = $row.find("td.start-date-time span.date").text().trim();
 
-    // ambil teams dari line yang mengandung v/vs/-
-    const lines = text.split("\n").map(clean).filter(Boolean);
-    const lineTeams =
-      lines.find(l => /\sv\s/i.test(l) || /\svs\s/i.test(l) || /\s-\s/.test(l)) || text;
+    // sport
+    const sport =
+      $row.find("td.competition-name img").attr("alt") || "";
 
-    const { home, away } = extractTeamsFromText(lineTeams);
+    // competition
+    const competition =
+      $row.find("td.competition-name a").first().text().trim();
 
-    // event_url: coba ambil link pertama dalam block
-    let event_url = "";
-    const href = $block.find("a").first().attr("href");
-    if (href) {
-      event_url = href.startsWith("http") ? href : `https://www.wheresthematch.com${href}`;
-    }
-
-    // date: coba dari header terdekat
-    const headerGuess = pickNearestHeaderText($, $block);
-    let baseDate = tryParseDateFromText(headerGuess, defaultYear);
-
-    // fallback kalau header gak kebaca: pake start date (ga akurat tapi keep data)
-    if (!baseDate) {
-      baseDate = new Date(startDate);
-      baseDate.setUTCHours(0, 0, 0, 0);
-    } else {
-      baseDate.setHours(0, 0, 0, 0);
-    }
-
-    // sport/competition: best-effort dari headerGuess (kalau headerGuess isinya sport/competition)
-    // (WTM kadang header = tanggal, jadi bisa kosong)
-    const sport = ""; // nanti bisa di-upgrade kalau udah tau selector stabil
-    const competition = ""; // nanti bisa di-upgrade kalau udah tau selector stabil
-
-    // hari/tanggal untuk output WITA (biar mirip style lu)
-    // NOTE: time di WTM biasanya waktu UK/GMT/Local UK; lu bisa mapping ke WITA nanti.
-    // Untuk sekarang kita simpan sebagai "time_gmt" + tanggal baseDate.
-    const hari_wita = formatIdDay(baseDate, "Asia/Makassar");
-    const tanggal_wita = formatIdDate(baseDate, "Asia/Makassar");
-
-    const channels = extractChannels($, $block);
+    // channels
+    const channels = [];
+    $row.find("td.channel-details img").each((_, img) => {
+      let t = $(img).attr("title") || $(img).attr("alt") || "";
+      t = t.replace(/Live on\s*/i, "").trim();
+      if (t) channels.push(t);
+    });
 
     rows.push({
       day: "range",
-      hari: hari_wita,
-      tanggal: tanggal_wita,
-      time_gmt,
+      tanggal: dateText,
+      time_gmt: time,
       sport,
       competition,
       home,
       away,
-      title: home && away ? `${home} vs ${away}` : lineTeams,
+      title: `${home} vs ${away}`,
       channels: channels.join(" | "),
-      event_url
+      event_url: ""
     });
-  }
+  });
 
   return rows;
 }
