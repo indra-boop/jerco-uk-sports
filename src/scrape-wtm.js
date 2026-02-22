@@ -1,23 +1,41 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 const fs = require("fs");
+const { wrapper } = require("axios-cookiejar-support");
+const { CookieJar } = require("tough-cookie");
 
 /**
  * WTM Scraper (Range) -> Output WITA
- * - kolom GMT dihilangkan
- * - kolom "day" dihapus
  * - hari/tanggal/time = WITA (Asia/Makassar)
  * - tanggal format: dd-mm-yyyy
- * - jika channel > 1 dipisah ke channel_1..channel_8
+ * - channels dipisah channel_1..channel_8
  * - urutan kolom CSV:
  *   hari, tanggal, time WITA, sport, competition, title, home, away, channel_1..channel_8, event_url
- * - simpan raw HTML ke /out untuk audit (per fetch)
- * - optional POST ke Google Apps Script via WEBAPP_URL
+ * - pagination: GET page1, lalu POST /live-sport-on-tv/?paging=true untuk page berikutnya
+ * - simpan raw HTML ke /out (per page)
+ * - optional POST ke GAS (WEBAPP_URL)
  */
 
 function getWebappUrl() {
   return process.env.WEBAPP_URL;
 }
+
+/* =========================
+   AXIOS CLIENT + COOKIE JAR
+   ========================= */
+const jar = new CookieJar();
+const client = wrapper(
+  axios.create({
+    jar,
+    withCredentials: true,
+    timeout: 45000,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+      "Accept-Language": "en-GB,en;q=0.9",
+    },
+  })
+);
 
 /* =========================
    HELPERS
@@ -39,22 +57,6 @@ function buildUrl(startYYYYMMDD, endYYYYMMDD) {
   return `https://www.wheresthematch.com/live-sport-on-tv/?showdatestart=${startYYYYMMDD}&showdateend=${endYYYYMMDD}`;
 }
 
-function splitChannelsToCols(chArr, max = 8) {
-  const cols = {};
-  for (let i = 0; i < max; i++) cols[`channel_${i + 1}`] = "";
-  (chArr || []).slice(0, max).forEach((c, idx) => {
-    cols[`channel_${idx + 1}`] = c;
-  });
-  return cols;
-}
-
-/**
- * Convert ISO Z time (UTC) -> WITA parts
- * output:
- * - hari: "Minggu", "Senin", ...
- * - tanggal: dd-mm-yyyy
- * - time: HH:MM
- */
 function isoToWitaPartsISO(isoZ) {
   const dt = new Date(isoZ);
   if (Number.isNaN(dt.getTime())) return null;
@@ -87,23 +89,69 @@ function isoToWitaPartsISO(isoZ) {
   return { hari, tanggal, time };
 }
 
-/* =========================
-   HTTP FETCH
-   ========================= */
-const headers = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-  "Accept-Language": "en-GB,en;q=0.9",
-};
-
-async function fetchHtml(url) {
-  const res = await axios.get(url, { headers, timeout: 30000 });
-  return { status: res.status, html: res.data };
+function splitChannelsToCols(chArr, max = 8) {
+  const cols = {};
+  for (let i = 0; i < max; i++) cols[`channel_${i + 1}`] = "";
+  (chArr || []).slice(0, max).forEach((c, idx) => {
+    cols[`channel_${idx + 1}`] = c;
+  });
+  return cols;
 }
 
-function looksLikeWTMPageHasFixtures(html) {
-  // minimal sanity: ada fixture-details
-  return typeof html === "string" && html.includes("fixture-details");
+/* =========================
+   PAGINATION DETECTOR
+   ========================= */
+function getTotalPagesFromHtml(html) {
+  // cari goPage(0), goPage(1), dst
+  const matches = [...html.matchAll(/goPage\((\d+)\)/g)].map((m) => parseInt(m[1], 10));
+  if (!matches.length) return 1;
+  return Math.max(...matches) + 1; // 0-based
+}
+
+/**
+ * Ambil semua hidden inputs dari form utama (ASP.NET biasanya butuh ini untuk paging)
+ */
+function extractHiddenFormFields($) {
+  const data = {};
+  // ambil semua hidden input di page
+  $("input[type='hidden']").each((_, el) => {
+    const name = $(el).attr("name");
+    const value = $(el).attr("value") ?? "";
+    if (name) data[name] = value;
+  });
+  return data;
+}
+
+/**
+ * Set page index ke field paging yang ada (WTM kelihatan pakai pagetotalhp*)
+ * Karena implementasi bisa beda, kita set beberapa kandidat kalau ada.
+ */
+function applyPagingIndex(formData, pageIndex0Based) {
+  const page1Based = String(pageIndex0Based + 1);
+
+  // dari cookie lu kelihatan ada pagetotalhp3 / pagetotalhp2 / pagetotalhp0
+  // jadi kita update yang exist aja
+  const candidates = ["pagetotalhp3", "pagetotalhp2", "pagetotalhp1", "page", "pagenum"];
+  for (const k of candidates) {
+    if (Object.prototype.hasOwnProperty.call(formData, k)) {
+      formData[k] = page1Based;
+    }
+  }
+
+  // beberapa ASP.NET paging pakai __EVENTTARGET / __EVENTARGUMENT
+  if (Object.prototype.hasOwnProperty.call(formData, "__EVENTARGUMENT")) {
+    formData["__EVENTARGUMENT"] = page1Based;
+  }
+  // kalau ada __EVENTTARGET, biarin aja (jangan kosongin)
+  return formData;
+}
+
+function toFormUrlEncoded(obj) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(obj || {})) {
+    p.append(k, v == null ? "" : String(v));
+  }
+  return p.toString();
 }
 
 /* =========================
@@ -126,27 +174,22 @@ function parseWTMEvents($) {
       const $st = starts[i] ? $(starts[i]) : null;
       const $ch = channels[i] ? $(channels[i]) : null;
 
-      // Teams dari content="India v South-Africa"
       const matchContent = ($fx.attr("content") || "").trim();
       const parts = matchContent.split(" v ");
       const home = parts[0] ? parts[0].replace(/-/g, " ").trim() : "";
       const away = parts[1] ? parts[1].replace(/-/g, " ").trim() : "";
 
-      // Sport + competition
       const sport = $fx.find(".fixture-sport img").attr("alt")?.trim() || "";
       const competition = $fx.find(".fixture-comp a").first().text().trim() || "";
 
-      // ISO Z (UTC) untuk konversi WITA
+      // ISO Z (UTC) untuk convert WITA
       let isoZ = "";
       if ($st) isoZ = ($st.attr("content") || "").trim();
-
-      // fallback ISO ada di meta itemprop startDate dalam row
       if (!isoZ) {
         const metaIso = $tr.find('meta[itemprop="startDate"]').first().attr("content");
         if (metaIso) isoZ = metaIso.trim();
       }
 
-      // hasil WITA
       let hari = "";
       let tanggal = "";
       let time = "";
@@ -158,14 +201,9 @@ function parseWTMEvents($) {
           tanggal = w.tanggal;
           time = w.time;
         }
-      } else if ($st) {
-        // fallback kalau ISO gak ada (kurang akurat timezone)
-        time = $st.find("span.time").text().trim() || "";
-        tanggal = $st.find("span.date").text().trim() || "";
-        hari = "";
       }
 
-      // Channels
+      // channels
       const channelList = [];
       if ($ch) {
         $ch.find("img").each((_, img) => {
@@ -203,7 +241,7 @@ function parseWTMEvents($) {
 }
 
 /* =========================
-   DEDUPE (WITA-based)
+   DEDUPE
    ========================= */
 function dedupeRows(rows) {
   const seen = new Set();
@@ -219,7 +257,6 @@ function dedupeRows(rows) {
       r.away,
       r.channel_1,
       r.channel_2,
-      r.event_url,
     ]
       .join("|")
       .toLowerCase();
@@ -229,6 +266,47 @@ function dedupeRows(rows) {
     out.push(r);
   }
   return out;
+}
+
+/* =========================
+   FETCH PAGE 1 (GET) + PAGE N (POST paging=true)
+   ========================= */
+async function fetchFirstPage(urlBase) {
+  const res = await client.get(urlBase, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+  return { html: res.data, status: res.status };
+}
+
+async function fetchPagedPage(urlBase, prevHtml, pageIndex0Based) {
+  // endpoint paging (sesuai Network lu)
+  const pagingUrl = "https://www.wheresthematch.com/live-sport-on-tv/?paging=true";
+
+  // ambil hidden fields dari HTML terakhir (biasanya berubah tiap page)
+  const $ = cheerio.load(prevHtml);
+  const formData = extractHiddenFormFields($);
+
+  // inject page index
+  applyPagingIndex(formData, pageIndex0Based);
+
+  // kadang perlu bawa showdatestart/showdateend juga kalau ada
+  // (kalau hidden inputs sudah ada, aman)
+  // kalau gak ada, minimal tetap referer ke urlBase
+
+  const body = toFormUrlEncoded(formData);
+
+  const res = await client.post(pagingUrl, body, {
+    headers: {
+      Origin: "https://www.wheresthematch.com",
+      Referer: urlBase,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "text/html, */*; q=0.9",
+    },
+  });
+
+  return { html: res.data, status: res.status, usedUrl: pagingUrl };
 }
 
 /* =========================
@@ -243,89 +321,57 @@ function dedupeRows(rows) {
     process.exit(1);
   }
 
+  const urlBase = buildUrl(start, end);
+  console.log("Fetching:", urlBase);
+
   fs.mkdirSync("out", { recursive: true });
 
-  const urlBase = buildUrl(start, end);
-  console.log("Fetching base:", urlBase);
-
-  // 1) PAGE 1 (base)
-  const baseRes = await fetchHtml(urlBase);
-  console.log("HTTP base:", baseRes.status);
+  // GET page 1
+  const first = await fetchFirstPage(urlBase);
+  console.log("HTTP page1:", first.status);
 
   const rawPath1 = `${process.cwd()}/out/wtm-${start}-${end}-p1.html`;
-  fs.writeFileSync(rawPath1, baseRes.html, "utf-8");
+  fs.writeFileSync(rawPath1, first.html, "utf-8");
   console.log("Saved raw HTML:", rawPath1);
 
+  const totalPages = getTotalPagesFromHtml(first.html);
+  console.log("Detected pages:", totalPages);
+
   let rowsAll = [];
+  let prevHtml = first.html;
+
+  // parse page1
   {
-    const $ = cheerio.load(baseRes.html);
+    const $ = cheerio.load(first.html);
     const r1 = parseWTMEvents($);
-    console.log("Rows page 1:", r1.length);
+    console.log("Rows p1:", r1.length);
     rowsAll.push(...r1);
   }
 
-  // 2) PAGING MODE (biasanya berisi page 2..n)
-  const pagingUrl = urlBase + "&paging=true";
-  console.log("Fetching paging:", pagingUrl);
+  // POST page2..N
+  for (let p = 1; p < totalPages; p++) {
+    console.log(`Fetching page ${p + 1}/${totalPages} via POST paging=true ...`);
+    const got = await fetchPagedPage(urlBase, prevHtml, p);
 
-  let pagingRes;
-  try {
-    pagingRes = await fetchHtml(pagingUrl);
-    console.log("HTTP paging:", pagingRes.status);
+    const rawPath = `${process.cwd()}/out/wtm-${start}-${end}-p${p + 1}.html`;
+    fs.writeFileSync(rawPath, got.html, "utf-8");
+    console.log("Saved raw HTML:", rawPath, "HTTP:", got.status);
 
-    const rawPathPaging = `${process.cwd()}/out/wtm-${start}-${end}-paging.html`;
-    fs.writeFileSync(rawPathPaging, pagingRes.html, "utf-8");
-    console.log("Saved raw HTML:", rawPathPaging);
+    const $p = cheerio.load(got.html);
+    const rp = parseWTMEvents($p);
+    console.log(`Rows p${p + 1}:`, rp.length);
+    rowsAll.push(...rp);
 
-    if (looksLikeWTMPageHasFixtures(pagingRes.html)) {
-      const $p = cheerio.load(pagingRes.html);
-      const rp = parseWTMEvents($p);
-      console.log("Rows paging:", rp.length);
-      rowsAll.push(...rp);
-    } else {
-      console.warn("Paging page doesn't contain fixtures-details (maybe blocked/changed).");
-    }
-  } catch (e) {
-    console.warn("Paging fetch failed:", e.message);
+    // penting: update prevHtml (VIEWSTATE berubah)
+    prevHtml = got.html;
   }
 
-  /**
-   * 3) OPTIONAL FALLBACK:
-   * Kadang paging=true masih punya pagination internal (jarang, tapi ada).
-   * Kita coba page=2..5 kalau ketemu fixtures baru.
-   */
-  const MAX_FALLBACK_PAGES = 5;
-  for (let p = 2; p <= MAX_FALLBACK_PAGES; p++) {
-    const u = pagingUrl + `&page=${p}`;
-    try {
-      const { status, html } = await fetchHtml(u);
-      if (status !== 200) break;
-
-      const rawPath = `${process.cwd()}/out/wtm-${start}-${end}-paging-page${p}.html`;
-      fs.writeFileSync(rawPath, html, "utf-8");
-      console.log("Saved raw HTML:", rawPath);
-
-      if (!looksLikeWTMPageHasFixtures(html)) break;
-
-      const $x = cheerio.load(html);
-      const rx = parseWTMEvents($x);
-      if (!rx.length) break;
-
-      console.log(`Rows paging page=${p}:`, rx.length);
-      rowsAll.push(...rx);
-    } catch (_) {
-      break;
-    }
-  }
-
-  let rows = dedupeRows(rowsAll);
+  const rows = dedupeRows(rowsAll);
   console.log("TOTAL rows (deduped):", rows.length);
 
-  if (rows.length === 0) {
-    console.warn("Warning: no rows scraped. Check site layout / blocking.");
-  }
-
-  // CSV output (WITA) - urutan sesuai request
+  // CSV output
+  // NOTE: header boleh ada spasi ("time WITA") — Excel/Sheets aman.
+  // Kalau mau enak dipakai program lain, pakai time_WITA.
   let csv =
     "hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,channel_3,channel_4,channel_5,channel_6,channel_7,channel_8,event_url\n";
 
@@ -337,7 +383,7 @@ function dedupeRows(rows) {
   fs.writeFileSync(csvPath, csv, "utf-8");
   console.log("CSV written:", csvPath);
 
-  // optional: send ke Google Sheets (GAS)
+  // optional: send ke GAS
   const WEBAPP_URL = getWebappUrl();
   if (!WEBAPP_URL) {
     console.log("WEBAPP_URL not set, skip sending to Google Sheets");
@@ -349,7 +395,6 @@ function dedupeRows(rows) {
       headers: { "Content-Type": "application/json" },
       timeout: 30000,
     });
-
     console.log("GAS status:", postRes.status);
     console.log("GAS response:", postRes.data);
   } catch (e) {
