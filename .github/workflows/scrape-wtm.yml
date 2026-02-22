@@ -58,15 +58,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 1. Tambahkan semua perubahan ke area 'stage' terlebih dahulu
-          git add out/*.html results.csv package.json package-lock.json || true
+          # 1. Masukkan hasil terbaru ke area simpan
+          git add results.csv out/*.html package-lock.json || true
           
-          # 2. Lakukan commit lokal sebelum menarik perubahan dari server
-          git commit -m "wtm: update ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
+          # 2. Commit perubahan tersebut
+          git commit -m "Update data terbaru: 423 items" || echo "Tidak ada perubahan"
           
-          # 3. Tarik perubahan terbaru dari server dengan rebase
-          # Strategi ini menggabungkan commit lokal Anda di atas perubahan server
+          # 3. Sinkronkan dengan server (PENTING)
           git pull --rebase origin main
           
-          # 4. Push ke repositori utama
+          # 4. Unggah ke GitHub
           git push origin main
