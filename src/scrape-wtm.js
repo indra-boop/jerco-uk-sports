@@ -186,29 +186,34 @@ function parseWTMEvents($) {
   const rows = [];
 
   $("td.fixture-details").each((_, td) => {
-    const $td = $(td);
-    const $row = $td.closest("tr");
+    const $fixture = $(td);
 
-    const matchContent = $td.attr("content") || "";
+    const matchContent = $fixture.attr("content") || "";
     const teams = matchContent.split(" v ");
 
     const home = teams[0] ? teams[0].replace(/-/g, " ").trim() : "";
     const away = teams[1] ? teams[1].replace(/-/g, " ").trim() : "";
 
-    const time = $row.find("td.start-date-time span.time").text().trim();
-    const dateText = $row.find("td.start-date-time span.date").text().trim();
+    // Ambil td berikutnya untuk waktu
+    const $startTd = $fixture.parent().next().find("td.start-date-time");
 
-    // sport
-    const sport =
-      $row.find("td.competition-name img").attr("alt") || "";
+    const time = $startTd.find("span.time").text().trim();
+    const dateText = $startTd.find("span.date").text().trim();
 
     // competition
-    const competition =
-      $row.find("td.competition-name a").first().text().trim();
+    const $compTd = $startTd.parent().next().find("td.competition-name");
 
-    // channels
+    const sport =
+      $compTd.find("img").attr("alt") || "";
+
+    const competition =
+      $compTd.find("a").first().text().trim();
+
+    // channel
+    const $channelTd = $compTd.parent().next().find("td.channel-details");
+
     const channels = [];
-    $row.find("td.channel-details img").each((_, img) => {
+    $channelTd.find("img").each((_, img) => {
       let t = $(img).attr("title") || $(img).attr("alt") || "";
       t = t.replace(/Live on\s*/i, "").trim();
       if (t) channels.push(t);
