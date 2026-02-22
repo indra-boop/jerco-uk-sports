@@ -12,7 +12,7 @@ on:
         required: true
         default: "20260301"
   schedule:
-    - cron: "10 1 * * *" # harian pukul 01:10 UTC
+    - cron: "10 1 * * *"
 
 permissions:
   contents: write
@@ -25,7 +25,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Mengambil seluruh riwayat agar pull/rebase lancar
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -33,7 +33,6 @@ jobs:
           node-version: "20"
 
       - name: Install deps
-        # Menggunakan npm install agar package-lock.json diperbarui otomatis
         run: npm install 
 
       - name: Determine date range
@@ -57,14 +56,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Paksa Git untuk mengenali perubahan file
+          # Tambahkan hasil scrape ke staging
           git add results.csv out/*.html package-lock.json || true
           
-          # Lakukan commit
-          git commit -m "Update data: Mencakup Halaman 3 (Total 423 items)" || echo "No changes detected"
+          # Commit lokal hasil scrape
+          git commit -m "wtm: update data ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }} (423 items)" || echo "no changes"
           
-          # Ambil perubahan terbaru dan gabungkan hasil scrape di atasnya
+          # Sinkronkan dengan server
           git pull --rebase origin main
           
-          # Kirim ke GitHub
+          # Push ke repositori
           git push origin main
