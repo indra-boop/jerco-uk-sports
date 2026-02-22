@@ -31,10 +31,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          # Cache dinonaktifkan sementara untuk menghindari error 'lock file not found' 
-          # sampai file package-lock.json Anda stabil di root
 
       - name: Install deps
+        # Menggunakan npm install agar package-lock.json diperbarui otomatis
         run: npm install 
 
       - name: Determine date range
@@ -58,14 +57,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 1. Masukkan hasil terbaru ke area simpan
-          git add results.csv out/*.html package-lock.json || true
+          # 1. Tambahkan hasil terbaru ke area staging
+          git add results.csv out/*.html package.json package-lock.json || true
           
-          # 2. Commit perubahan tersebut
-          git commit -m "Update data terbaru: 423 items" || echo "Tidak ada perubahan"
+          # 2. Lakukan COMMIT lokal sebelum menarik perubahan dari server
+          git commit -m "wtm: update data ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }}" || echo "no changes"
           
-          # 3. Sinkronkan dengan server (PENTING)
+          # 3. Sinkronkan dengan server menggunakan rebase untuk menghindari konflik
           git pull --rebase origin main
           
-          # 4. Unggah ke GitHub
+          # 4. Unggah hasil ke GitHub
           git push origin main
