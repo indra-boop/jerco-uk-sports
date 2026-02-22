@@ -11,7 +11,7 @@ const fs = require("fs");
  * - jika channel > 1 dipisah ke channel_1..channel_8
  * - urutan kolom CSV:
  *   hari, tanggal, time WITA, sport, competition, title, home, away, channel_1..channel_8, event_url
- * - simpan raw HTML ke /out untuk audit (per page)
+ * - simpan raw HTML ke /out untuk audit (per fetch)
  * - optional POST ke Google Apps Script via WEBAPP_URL
  */
 
@@ -37,6 +37,15 @@ function safeCsv(v) {
 
 function buildUrl(startYYYYMMDD, endYYYYMMDD) {
   return `https://www.wheresthematch.com/live-sport-on-tv/?showdatestart=${startYYYYMMDD}&showdateend=${endYYYYMMDD}`;
+}
+
+function splitChannelsToCols(chArr, max = 8) {
+  const cols = {};
+  for (let i = 0; i < max; i++) cols[`channel_${i + 1}`] = "";
+  (chArr || []).slice(0, max).forEach((c, idx) => {
+    cols[`channel_${idx + 1}`] = c;
+  });
+  return cols;
 }
 
 /**
@@ -78,71 +87,23 @@ function isoToWitaPartsISO(isoZ) {
   return { hari, tanggal, time };
 }
 
-function splitChannelsToCols(chArr, max = 8) {
-  const cols = {};
-  for (let i = 0; i < max; i++) cols[`channel_${i + 1}`] = "";
-  (chArr || []).slice(0, max).forEach((c, idx) => {
-    cols[`channel_${idx + 1}`] = c;
-  });
-  return cols;
-}
-
 /* =========================
-   PAGINATION (goPage)
+   HTTP FETCH
    ========================= */
-function getMaxGoPageIndex(html) {
-  const matches = [...html.matchAll(/goPage\((\d+)\)/g)].map((m) => parseInt(m[1], 10));
-  if (!matches.length) return 0;
-  return Math.max(...matches);
-}
-
-function makePageUrls(urlBase, pageIndex) {
-  // pageIndex: 0-based dari goPage
-  // beberapa site 1-based param, kita coba beberapa varian
-  const base = new URL(urlBase);
-
-  const u1 = new URL(base.toString());
-  u1.searchParams.set("page", String(pageIndex + 1));
-
-  const u2 = new URL(base.toString());
-  u2.searchParams.set("p", String(pageIndex + 1));
-
-  const u3 = new URL(base.toString());
-  u3.searchParams.set("showpage", String(pageIndex + 1));
-
-  const u4 = new URL(base.toString());
-  u4.searchParams.set("goPage", String(pageIndex)); // 0-based
-
-  return [u1.toString(), u2.toString(), u3.toString(), u4.toString()];
-}
+const headers = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+  "Accept-Language": "en-GB,en;q=0.9",
+};
 
 async function fetchHtml(url) {
-  const res = await axios.get(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
-      "Accept-Language": "en-GB,en;q=0.9",
-    },
-    timeout: 30000,
-  });
+  const res = await axios.get(url, { headers, timeout: 30000 });
   return { status: res.status, html: res.data };
 }
 
-async function fetchWTMPage(urlBase, pageIndex) {
-  const candidates = makePageUrls(urlBase, pageIndex);
-
-  for (const u of candidates) {
-    try {
-      const { status, html } = await fetchHtml(u);
-      if (status === 200 && typeof html === "string" && html.length > 1000) {
-        return { usedUrl: u, html };
-      }
-    } catch (_) {}
-  }
-
-  // fallback: return base
-  const { html } = await fetchHtml(urlBase);
-  return { usedUrl: urlBase, html };
+function looksLikeWTMPageHasFixtures(html) {
+  // minimal sanity: ada fixture-details
+  return typeof html === "string" && html.includes("fixture-details");
 }
 
 /* =========================
@@ -165,22 +126,27 @@ function parseWTMEvents($) {
       const $st = starts[i] ? $(starts[i]) : null;
       const $ch = channels[i] ? $(channels[i]) : null;
 
+      // Teams dari content="India v South-Africa"
       const matchContent = ($fx.attr("content") || "").trim();
       const parts = matchContent.split(" v ");
       const home = parts[0] ? parts[0].replace(/-/g, " ").trim() : "";
       const away = parts[1] ? parts[1].replace(/-/g, " ").trim() : "";
 
+      // Sport + competition
       const sport = $fx.find(".fixture-sport img").attr("alt")?.trim() || "";
       const competition = $fx.find(".fixture-comp a").first().text().trim() || "";
 
-      // ISO Z (UTC)
+      // ISO Z (UTC) untuk konversi WITA
       let isoZ = "";
       if ($st) isoZ = ($st.attr("content") || "").trim();
+
+      // fallback ISO ada di meta itemprop startDate dalam row
       if (!isoZ) {
         const metaIso = $tr.find('meta[itemprop="startDate"]').first().attr("content");
         if (metaIso) isoZ = metaIso.trim();
       }
 
+      // hasil WITA
       let hari = "";
       let tanggal = "";
       let time = "";
@@ -193,12 +159,13 @@ function parseWTMEvents($) {
           time = w.time;
         }
       } else if ($st) {
-        // fallback kalau ISO gak ada
+        // fallback kalau ISO gak ada (kurang akurat timezone)
         time = $st.find("span.time").text().trim() || "";
         tanggal = $st.find("span.date").text().trim() || "";
         hari = "";
       }
 
+      // Channels
       const channelList = [];
       if ($ch) {
         $ch.find("img").each((_, img) => {
@@ -208,6 +175,7 @@ function parseWTMEvents($) {
         });
       }
 
+      // event_url
       let event_url = "";
       const href =
         $fx.find("a.mobile-buy-pass").first().attr("href") ||
@@ -251,6 +219,7 @@ function dedupeRows(rows) {
       r.away,
       r.channel_1,
       r.channel_2,
+      r.event_url,
     ]
       .join("|")
       .toLowerCase();
@@ -274,43 +243,79 @@ function dedupeRows(rows) {
     process.exit(1);
   }
 
-  const urlBase = buildUrl(start, end);
-  console.log("Fetching:", urlBase);
-
-  // page 1
-  const first = await fetchHtml(urlBase);
-  console.log("HTTP:", first.status);
-
   fs.mkdirSync("out", { recursive: true });
+
+  const urlBase = buildUrl(start, end);
+  console.log("Fetching base:", urlBase);
+
+  // 1) PAGE 1 (base)
+  const baseRes = await fetchHtml(urlBase);
+  console.log("HTTP base:", baseRes.status);
+
   const rawPath1 = `${process.cwd()}/out/wtm-${start}-${end}-p1.html`;
-  fs.writeFileSync(rawPath1, first.html, "utf-8");
+  fs.writeFileSync(rawPath1, baseRes.html, "utf-8");
   console.log("Saved raw HTML:", rawPath1);
 
-  // detect pagination
-  const maxIdx = getMaxGoPageIndex(first.html);
-  const totalPages = maxIdx + 1;
-  console.log("Pagination pages:", totalPages);
-
-  // parse page 1
   let rowsAll = [];
   {
-    const $ = cheerio.load(first.html);
+    const $ = cheerio.load(baseRes.html);
     const r1 = parseWTMEvents($);
     console.log("Rows page 1:", r1.length);
-    rowsAll = rowsAll.concat(r1);
+    rowsAll.push(...r1);
   }
 
-  // fetch + parse page 2..n
-  for (let p = 1; p < totalPages; p++) {
-    const got = await fetchWTMPage(urlBase, p);
-    const rawPath = `${process.cwd()}/out/wtm-${start}-${end}-p${p + 1}.html`;
-    fs.writeFileSync(rawPath, got.html, "utf-8");
-    console.log(`Saved raw HTML page ${p + 1}:`, rawPath, "from:", got.usedUrl);
+  // 2) PAGING MODE (biasanya berisi page 2..n)
+  const pagingUrl = urlBase + "&paging=true";
+  console.log("Fetching paging:", pagingUrl);
 
-    const $p = cheerio.load(got.html);
-    const rp = parseWTMEvents($p);
-    console.log(`Rows page ${p + 1}:`, rp.length);
-    rowsAll = rowsAll.concat(rp);
+  let pagingRes;
+  try {
+    pagingRes = await fetchHtml(pagingUrl);
+    console.log("HTTP paging:", pagingRes.status);
+
+    const rawPathPaging = `${process.cwd()}/out/wtm-${start}-${end}-paging.html`;
+    fs.writeFileSync(rawPathPaging, pagingRes.html, "utf-8");
+    console.log("Saved raw HTML:", rawPathPaging);
+
+    if (looksLikeWTMPageHasFixtures(pagingRes.html)) {
+      const $p = cheerio.load(pagingRes.html);
+      const rp = parseWTMEvents($p);
+      console.log("Rows paging:", rp.length);
+      rowsAll.push(...rp);
+    } else {
+      console.warn("Paging page doesn't contain fixtures-details (maybe blocked/changed).");
+    }
+  } catch (e) {
+    console.warn("Paging fetch failed:", e.message);
+  }
+
+  /**
+   * 3) OPTIONAL FALLBACK:
+   * Kadang paging=true masih punya pagination internal (jarang, tapi ada).
+   * Kita coba page=2..5 kalau ketemu fixtures baru.
+   */
+  const MAX_FALLBACK_PAGES = 5;
+  for (let p = 2; p <= MAX_FALLBACK_PAGES; p++) {
+    const u = pagingUrl + `&page=${p}`;
+    try {
+      const { status, html } = await fetchHtml(u);
+      if (status !== 200) break;
+
+      const rawPath = `${process.cwd()}/out/wtm-${start}-${end}-paging-page${p}.html`;
+      fs.writeFileSync(rawPath, html, "utf-8");
+      console.log("Saved raw HTML:", rawPath);
+
+      if (!looksLikeWTMPageHasFixtures(html)) break;
+
+      const $x = cheerio.load(html);
+      const rx = parseWTMEvents($x);
+      if (!rx.length) break;
+
+      console.log(`Rows paging page=${p}:`, rx.length);
+      rowsAll.push(...rx);
+    } catch (_) {
+      break;
+    }
   }
 
   let rows = dedupeRows(rowsAll);
@@ -320,7 +325,7 @@ function dedupeRows(rows) {
     console.warn("Warning: no rows scraped. Check site layout / blocking.");
   }
 
-  // CSV output (WITA) - sesuai format lu
+  // CSV output (WITA) - urutan sesuai request
   let csv =
     "hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,channel_3,channel_4,channel_5,channel_6,channel_7,channel_8,event_url\n";
 
