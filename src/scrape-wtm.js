@@ -1,7 +1,14 @@
-// scrape-wtm.js (FIX: no double rows, safer pagination)
+// scrape-wtm-daily.js
+// Daily scraper for Where's The Match (WTM) using showdatestart per date
+// - Scrape ALL pages via ASP.NET postback paging
+// - Save raw HTML per date/page to ./out/{date}/page-x.html
+// - Dedup global to prevent double rows
+// - Output: results.csv
+
 const axios = require("axios");
 const cheerio = require("cheerio");
 const fs = require("fs");
+const path = require("path");
 const { wrapper } = require("axios-cookiejar-support");
 const { CookieJar } = require("tough-cookie");
 
@@ -31,8 +38,9 @@ function safeCsv(v) {
   return (v ?? "").toString().replace(/"/g, '""');
 }
 
-function buildUrl(start, end) {
-  return `https://www.wheresthematch.com/live-sport-on-tv/?showdatestart=${start}&showdateend=${end}`;
+function buildDailyUrl(dateYYYYMMDD) {
+  // WTM: daily page uses showdatestart only
+  return `https://www.wheresthematch.com/live-sport-on-tv/?showdatestart=${dateYYYYMMDD}`;
 }
 
 function isoToWitaPartsISO(isoZ) {
@@ -61,19 +69,19 @@ function extractHiddenFields($) {
 }
 
 /**
- * Detect total pages from HTML pagination.
- * Fix: jangan +1 ngawur. Ambil max goPage(n) apa adanya.
- * Kalau gak ketemu -> 1.
+ * IMPORTANT:
+ * WTM paging (ASP.NET) biasanya punya event target: pagetotalhp0, pagetotalhp1, dst.
+ * Cara paling aman: scan html untuk semua "pagetotalhp{n}" dan ambil max n.
+ * totalPages = maxIndex + 1 (karena page-1 = initial GET)
  */
-function detectTotalPages(html) {
-  const matches = [...html.matchAll(/goPage\((\d+)\)/g)].map((m) => parseInt(m[1], 10));
-  if (!matches.length) return 1;
+function detectPagingMaxIndex(html) {
+  const matches = [...html.matchAll(/pagetotalhp(\d+)/g)].map((m) => parseInt(m[1], 10));
+  if (!matches.length) return -1; // means no paging
   const max = Math.max(...matches);
-  // WTM biasanya goPage(1..N)
-  return Number.isFinite(max) && max >= 1 ? max : 1;
+  return Number.isFinite(max) ? max : -1;
 }
 
-function parseWTMEvents($, pageNum) {
+function parseWTMEvents($, pageNum, sourceDate) {
   const rows = [];
 
   $("table tr").each((_, tr) => {
@@ -111,6 +119,7 @@ function parseWTMEvents($, pageNum) {
       : "";
 
     rows.push({
+      source_date: sourceDate, // YYYYMMDD yang lu request
       page: pageNum,
       hari: w.hari,
       tanggal: w.tanggal,
@@ -129,148 +138,157 @@ function parseWTMEvents($, pageNum) {
 }
 
 /**
- * Dedup helper:
- * prefer event_url (paling unique), fallback ke tanggal+time+home+away
+ * Dedup global:
+ * prefer event_url (paling unique), fallback fingerprint stable
  */
 function dedupRows(rows) {
   const map = new Map();
   for (const r of rows) {
     const key =
       (r.event_url && r.event_url.trim()) ||
-      `${r.tanggal}|${r.time}|${r.home}|${r.away}|${r.sport}|${r.competition}`;
+      `${r.source_date}|${r.tanggal}|${r.time}|${r.home}|${r.away}|${r.sport}|${r.competition}`;
     if (!map.has(key)) map.set(key, r);
   }
   return Array.from(map.values());
 }
 
-async function scrape() {
-  const start = process.argv[2];
-  const end = process.argv[3];
+function fingerprintOfFirstRow(rows) {
+  if (!rows || rows.length === 0) return "";
+  const r = rows[0];
+  return (r.event_url && r.event_url.trim()) || `${r.tanggal}|${r.time}|${r.home}|${r.away}`;
+}
 
-  if (!start || !end) {
-    console.log("Usage: node scrape-wtm.js 20260222 20260301");
-    process.exit(1);
-  }
+/* =========================
+   SCRAPE ONE DATE (ALL PAGES)
+   ========================= */
+async function scrapeOneDate(dateYYYYMMDD) {
+  const urlBase = buildDailyUrl(dateYYYYMMDD);
+  const outDir = path.join("out", dateYYYYMMDD);
+  fs.mkdirSync(outDir, { recursive: true });
 
-  const urlBase = buildUrl(start, end);
-  fs.mkdirSync("out", { recursive: true });
+  let currentHtml = "";
 
-  let allData = [];
-  let currentPageHtml = "";
+  console.log(`\n== DATE ${dateYYYYMMDD} ==`);
+  console.log(`GET Page 1: ${urlBase}`);
 
-  // ===== Page 1 =====
-  console.log(`Fetching Page 1: ${urlBase}`);
   const res1 = await client.get(urlBase);
-  currentPageHtml = res1.data;
-  fs.writeFileSync(`./out/page-1.html`, currentPageHtml);
+  currentHtml = res1.data;
+  fs.writeFileSync(path.join(outDir, `page-1.html`), currentHtml);
 
-  const $1 = cheerio.load(currentPageHtml);
-  const p1Data = parseWTMEvents($1, 1);
-  allData.push(...p1Data);
-  allData = dedupRows(allData);
+  const $1 = cheerio.load(currentHtml);
+  let data = parseWTMEvents($1, 1, dateYYYYMMDD);
+  let allData = [...data];
 
-  console.log(`Page 1 done. Found: ${p1Data.length} items (after dedup: ${allData.length}).`);
+  console.log(`Page 1 rows: ${data.length}`);
 
-  // ===== Detect pages =====
-  const totalPages = detectTotalPages(currentPageHtml);
-  console.log(`Total pages detected: ${totalPages}`);
+  // detect paging
+  const maxIdx = detectPagingMaxIndex(currentHtml);
+  const totalPages = maxIdx >= 0 ? maxIdx + 1 : 1;
+  console.log(`Detected paging index max: ${maxIdx} => totalPages ~ ${totalPages}`);
 
-  // Fingerprint untuk detect halaman sama (biar stop kalau server balikin page yang sama)
-  let lastFingerprint = allData.length
-    ? (allData[0].event_url || `${allData[0].tanggal}|${allData[0].time}|${allData[0].home}|${allData[0].away}`)
-    : "";
+  let lastFp = fingerprintOfFirstRow(data);
 
-  // ===== Paging POST (Page 2..N) =====
-  for (let p = 2; p <= totalPages; p++) {
-    console.log(`Fetching Page ${p}/${totalPages}...`);
-
-    // hidden fields harus dari HTML terakhir (ASP.NET postback)
-    const $prev = cheerio.load(currentPageHtml);
-    const hiddenFields = extractHiddenFields($prev);
-
-    // event target biasanya pakai index 1 untuk page 2, 2 untuk page 3, dst
-    // jadi idx = p-1
-    const idx = p - 1;
+  // page 2..N via POST postback
+  for (let pageNum = 2; pageNum <= totalPages; pageNum++) {
+    const idx = pageNum - 2; // because pagetotalhp0 usually means "go to page 2"
+    const $prev = cheerio.load(currentHtml);
+    const hidden = extractHiddenFields($prev);
 
     const payload = new URLSearchParams({
-      ...hiddenFields,
+      ...hidden,
       __EVENTTARGET: `pagetotalhp${idx}`,
       __EVENTARGUMENT: "",
     });
 
-    try {
-      const resNext = await client.post(
-        "https://www.wheresthematch.com/live-sport-on-tv/?paging=true",
-        payload.toString(),
-        {
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            Referer: urlBase,
-          },
-        }
-      );
+    console.log(`POST Page ${pageNum}/${totalPages} (target=pagetotalhp${idx})`);
 
-      currentPageHtml = resNext.data;
-      fs.writeFileSync(`./out/page-${p}.html`, currentPageHtml);
-
-      const $next = cheerio.load(currentPageHtml);
-      const pNextData = parseWTMEvents($next, p);
-
-      if (pNextData.length === 0) {
-        console.log(`Page ${p} returned 0 rows. Stop.`);
-        break;
+    const resNext = await client.post(
+      "https://www.wheresthematch.com/live-sport-on-tv/?paging=true",
+      payload.toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Referer: urlBase,
+        },
       }
+    );
 
-      // detect "same page returned" (server kadang balikin page sebelumnya)
-      const fp =
-        (pNextData[0].event_url && pNextData[0].event_url.trim()) ||
-        `${pNextData[0].tanggal}|${pNextData[0].time}|${pNextData[0].home}|${pNextData[0].away}`;
+    currentHtml = resNext.data;
+    fs.writeFileSync(path.join(outDir, `page-${pageNum}.html`), currentHtml);
 
-      if (fp && fp === lastFingerprint) {
-        console.log(`Duplicate page detected (same fingerprint). Stop pagination.`);
-        break;
-      }
+    const $n = cheerio.load(currentHtml);
+    const pData = parseWTMEvents($n, pageNum, dateYYYYMMDD);
 
-      // append + dedup
-      const before = allData.length;
-      allData.push(...pNextData);
-      allData = dedupRows(allData);
-      const after = allData.length;
-
-      console.log(`Page ${p} done. Found: ${pNextData.length}. Added unique: ${after - before}.`);
-
-      // update fingerprint
-      lastFingerprint = fp || lastFingerprint;
-
-      await new Promise((r) => setTimeout(r, 1500));
-    } catch (err) {
-      console.error(`Error on page ${p}:`, err.message);
+    if (pData.length === 0) {
+      console.log(`Page ${pageNum}: 0 rows => stop paging.`);
       break;
     }
+
+    const fp = fingerprintOfFirstRow(pData);
+    if (fp && fp === lastFp) {
+      console.log(`Page ${pageNum}: duplicate page returned (same fingerprint) => stop paging.`);
+      break;
+    }
+
+    lastFp = fp || lastFp;
+    allData.push(...pData);
+
+    // small delay
+    await new Promise((r) => setTimeout(r, 1200));
   }
 
-  // ===== Final dedup (safety) =====
   allData = dedupRows(allData);
-
-  // ===== CSV build =====
-  let csv =
-    "page,hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,event_url\n";
-
-  allData.forEach((r) => {
-    csv += `"${safeCsv(r.page)}","${safeCsv(r.hari)}","${safeCsv(r.tanggal)}","${safeCsv(
-      r.time
-    )}","${safeCsv(r.sport)}","${safeCsv(r.competition)}","${safeCsv(r.title)}","${safeCsv(
-      r.home
-    )}","${safeCsv(r.away)}","${safeCsv(r.channels?.[0])}","${safeCsv(
-      r.channels?.[1]
-    )}","${safeCsv(r.event_url)}"\n`;
-  });
-
-  fs.writeFileSync("results.csv", csv);
-  console.log(`\nCOMPLETED! Total unique data: ${allData.length}. Saved to results.csv`);
+  console.log(`DATE ${dateYYYYMMDD} unique rows: ${allData.length}`);
+  return allData;
 }
 
-scrape().catch((e) => {
+/* =========================
+   MAIN
+   ========================= */
+async function main() {
+  const dates = process.argv.slice(2).filter(Boolean);
+
+  if (dates.length === 0) {
+    console.log(
+      "Usage:\n  node scrape-wtm-daily.js 20260227 20260228 20260301 20260302 20260303 20260304"
+    );
+    process.exit(1);
+  }
+
+  fs.mkdirSync("out", { recursive: true });
+
+  let all = [];
+  for (const d of dates) {
+    // basic validation
+    if (!/^\d{8}$/.test(d)) {
+      console.log(`Skip invalid date: ${d} (must be YYYYMMDD)`);
+      continue;
+    }
+    const rows = await scrapeOneDate(d);
+    all.push(...rows);
+    all = dedupRows(all);
+  }
+
+  // build CSV
+  let csv =
+    "source_date,page,hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,event_url\n";
+
+  for (const r of all) {
+    csv += `"${safeCsv(r.source_date)}","${safeCsv(r.page)}","${safeCsv(r.hari)}","${safeCsv(
+      r.tanggal
+    )}","${safeCsv(r.time)}","${safeCsv(r.sport)}","${safeCsv(r.competition)}","${safeCsv(
+      r.title
+    )}","${safeCsv(r.home)}","${safeCsv(r.away)}","${safeCsv(r.channels?.[0])}","${safeCsv(
+      r.channels?.[1]
+    )}","${safeCsv(r.event_url)}"\n`;
+  }
+
+  fs.writeFileSync("results.csv", csv);
+  console.log(`\nDONE. Total unique rows (all dates): ${all.length}`);
+  console.log(`Saved: results.csv`);
+}
+
+main().catch((e) => {
   console.error("Fatal:", e);
   process.exit(1);
 });
