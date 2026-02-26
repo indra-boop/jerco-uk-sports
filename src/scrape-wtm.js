@@ -1,10 +1,4 @@
 // scrape-wtm-daily.js
-// Daily scraper for Where's The Match (WTM) using showdatestart per date
-// - Scrape ALL pages via ASP.NET postback paging
-// - Save raw HTML per date/page to ./out/{date}/page-x.html
-// - Dedup global to prevent double rows
-// - Output: results.csv
-
 const axios = require("axios");
 const cheerio = require("cheerio");
 const fs = require("fs");
@@ -39,7 +33,6 @@ function safeCsv(v) {
 }
 
 function buildDailyUrl(dateYYYYMMDD) {
-  // WTM: daily page uses showdatestart only
   return `https://www.wheresthematch.com/live-sport-on-tv/?showdatestart=${dateYYYYMMDD}`;
 }
 
@@ -66,19 +59,6 @@ function extractHiddenFields($) {
     if (name) fields[name] = value;
   });
   return fields;
-}
-
-/**
- * IMPORTANT:
- * WTM paging (ASP.NET) biasanya punya event target: pagetotalhp0, pagetotalhp1, dst.
- * Cara paling aman: scan html untuk semua "pagetotalhp{n}" dan ambil max n.
- * totalPages = maxIndex + 1 (karena page-1 = initial GET)
- */
-function detectPagingMaxIndex(html) {
-  const matches = [...html.matchAll(/pagetotalhp(\d+)/g)].map((m) => parseInt(m[1], 10));
-  if (!matches.length) return -1; // means no paging
-  const max = Math.max(...matches);
-  return Number.isFinite(max) ? max : -1;
 }
 
 function parseWTMEvents($, pageNum, sourceDate) {
@@ -119,7 +99,7 @@ function parseWTMEvents($, pageNum, sourceDate) {
       : "";
 
     rows.push({
-      source_date: sourceDate, // YYYYMMDD yang lu request
+      source_date: sourceDate,
       page: pageNum,
       hari: w.hari,
       tanggal: w.tanggal,
@@ -137,10 +117,6 @@ function parseWTMEvents($, pageNum, sourceDate) {
   return rows;
 }
 
-/**
- * Dedup global:
- * prefer event_url (paling unique), fallback fingerprint stable
- */
 function dedupRows(rows) {
   const map = new Map();
   for (const r of rows) {
@@ -159,38 +135,44 @@ function fingerprintOfFirstRow(rows) {
 }
 
 /* =========================
-   SCRAPE ONE DATE (ALL PAGES)
+   SCRAPE ONE DATE (BRUTE FORCE PAGING)
    ========================= */
-async function scrapeOneDate(dateYYYYMMDD) {
+async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
   const urlBase = buildDailyUrl(dateYYYYMMDD);
   const outDir = path.join("out", dateYYYYMMDD);
   fs.mkdirSync(outDir, { recursive: true });
 
-  let currentHtml = "";
+  const maxPagingIndex = Number.isFinite(opts.maxPagingIndex) ? opts.maxPagingIndex : 60; // safety
+  const delayMs = Number.isFinite(opts.delayMs) ? opts.delayMs : 1200;
 
   console.log(`\n== DATE ${dateYYYYMMDD} ==`);
   console.log(`GET Page 1: ${urlBase}`);
 
+  let currentHtml = "";
   const res1 = await client.get(urlBase);
   currentHtml = res1.data;
   fs.writeFileSync(path.join(outDir, `page-1.html`), currentHtml);
 
   const $1 = cheerio.load(currentHtml);
-  let data = parseWTMEvents($1, 1, dateYYYYMMDD);
-  let allData = [...data];
+  const p1 = parseWTMEvents($1, 1, dateYYYYMMDD);
 
-  console.log(`Page 1 rows: ${data.length}`);
+  let allData = [];
+  allData.push(...p1);
+  allData = dedupRows(allData);
 
-  // detect paging
-  const maxIdx = detectPagingMaxIndex(currentHtml);
-  const totalPages = maxIdx >= 0 ? maxIdx + 1 : 1;
-  console.log(`Detected paging index max: ${maxIdx} => totalPages ~ ${totalPages}`);
+  console.log(`Page 1 rows: ${p1.length} | unique total: ${allData.length}`);
 
-  let lastFp = fingerprintOfFirstRow(data);
+  // if page 1 empty, still keep html for audit and stop
+  if (p1.length === 0) {
+    console.log(`No rows on Page 1. Stop date ${dateYYYYMMDD}.`);
+    return allData;
+  }
 
-  // page 2..N via POST postback
-  for (let pageNum = 2; pageNum <= totalPages; pageNum++) {
-    const idx = pageNum - 2; // because pagetotalhp0 usually means "go to page 2"
+  let lastFp = fingerprintOfFirstRow(p1);
+  let pageNum = 2;
+
+  // brute force: try pagetotalhp0,1,2,... until it stops adding unique rows
+  for (let idx = 0; idx <= maxPagingIndex; idx++) {
     const $prev = cheerio.load(currentHtml);
     const hidden = extractHiddenFields($prev);
 
@@ -200,18 +182,24 @@ async function scrapeOneDate(dateYYYYMMDD) {
       __EVENTARGUMENT: "",
     });
 
-    console.log(`POST Page ${pageNum}/${totalPages} (target=pagetotalhp${idx})`);
+    console.log(`POST Page ${pageNum} (target=pagetotalhp${idx})`);
 
-    const resNext = await client.post(
-      "https://www.wheresthematch.com/live-sport-on-tv/?paging=true",
-      payload.toString(),
-      {
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Referer: urlBase,
-        },
-      }
-    );
+    let resNext;
+    try {
+      resNext = await client.post(
+        "https://www.wheresthematch.com/live-sport-on-tv/?paging=true",
+        payload.toString(),
+        {
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Referer: urlBase,
+          },
+        }
+      );
+    } catch (e) {
+      console.log(`POST failed on idx ${idx}: ${e.message}`);
+      break;
+    }
 
     currentHtml = resNext.data;
     fs.writeFileSync(path.join(outDir, `page-${pageNum}.html`), currentHtml);
@@ -224,21 +212,32 @@ async function scrapeOneDate(dateYYYYMMDD) {
       break;
     }
 
+    // same page returned protection
     const fp = fingerprintOfFirstRow(pData);
     if (fp && fp === lastFp) {
-      console.log(`Page ${pageNum}: duplicate page returned (same fingerprint) => stop paging.`);
+      console.log(`Page ${pageNum}: duplicate page returned (same fingerprint) => stop.`);
+      break;
+    }
+    lastFp = fp || lastFp;
+
+    const before = allData.length;
+    allData.push(...pData);
+    allData = dedupRows(allData);
+    const after = allData.length;
+
+    console.log(`Page ${pageNum}: rows ${pData.length} | added unique: ${after - before}`);
+
+    // if no new unique rows, stop (server likely looping / same page)
+    if (after === before) {
+      console.log(`No unique added => stop paging.`);
       break;
     }
 
-    lastFp = fp || lastFp;
-    allData.push(...pData);
-
-    // small delay
-    await new Promise((r) => setTimeout(r, 1200));
+    pageNum++;
+    await new Promise((r) => setTimeout(r, delayMs));
   }
 
-  allData = dedupRows(allData);
-  console.log(`DATE ${dateYYYYMMDD} unique rows: ${allData.length}`);
+  console.log(`DATE ${dateYYYYMMDD} DONE. unique rows: ${allData.length}`);
   return allData;
 }
 
@@ -259,17 +258,16 @@ async function main() {
 
   let all = [];
   for (const d of dates) {
-    // basic validation
     if (!/^\d{8}$/.test(d)) {
       console.log(`Skip invalid date: ${d} (must be YYYYMMDD)`);
       continue;
     }
-    const rows = await scrapeOneDate(d);
+    const rows = await scrapeOneDate(d, { maxPagingIndex: 60, delayMs: 1200 });
     all.push(...rows);
     all = dedupRows(all);
   }
 
-  // build CSV
+  // CSV
   let csv =
     "source_date,page,hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,event_url\n";
 
