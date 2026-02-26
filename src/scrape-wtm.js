@@ -1,11 +1,8 @@
 // src/scrape-wtm.js
 // WTM DAILY SCRAPER (LIST ONLY)
 // Usage: node src/scrape-wtm.js 20260227 20260228 20260301 ...
-// - scrape per date (showdatestart=YYYYMMDD)
-// - brute-force paging: pagetotalhp0..N until stop
-// - save raw html to out/{date}/page-x.html
-// - dedup global (no double rows)
-// - output: results.csv
+// Output CSV columns (NO source_date, NO page):
+// hari,tanggal,time WITA,sport,competition,title,home,away,channel_1..channel_8,event_url
 
 const axios = require("axios");
 const cheerio = require("cheerio");
@@ -69,6 +66,19 @@ function extractHiddenFields($) {
   return fields;
 }
 
+function uniqKeepOrder(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const x of arr) {
+    const k = (x || "").trim();
+    if (!k) continue;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
 function parseWTMEvents($, pageNum, sourceDate) {
   const rows = [];
 
@@ -107,8 +117,10 @@ function parseWTMEvents($, pageNum, sourceDate) {
       : "";
 
     rows.push({
+      // keep internal for dedup/logging (not exported to CSV)
       source_date: sourceDate,
       page: pageNum,
+
       hari: w.hari,
       tanggal: w.tanggal,
       time: w.time,
@@ -117,7 +129,7 @@ function parseWTMEvents($, pageNum, sourceDate) {
       title: home && away ? `${home} vs ${away}` : matchContent,
       home,
       away,
-      channels,
+      channels: uniqKeepOrder(channels),
       event_url,
     });
   });
@@ -256,7 +268,7 @@ async function main() {
     process.exit(1);
   }
 
-  // strict: list-only
+  // strict: list-only YYYYMMDD
   dates = dates.filter((d) => {
     if (!/^\d{8}$/.test(d)) {
       console.log(`Skip invalid date: ${d} (must be YYYYMMDD)`);
@@ -274,17 +286,20 @@ async function main() {
     all = dedupRows(all);
   }
 
-  // CSV output
+  // CSV (NO source_date, NO page) + channels up to 8
   let csv =
-    "source_date,page,hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,event_url\n";
+    "hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,channel_3,channel_4,channel_5,channel_6,channel_7,channel_8,event_url\n";
 
   for (const r of all) {
-    csv += `"${safeCsv(r.source_date)}","${safeCsv(r.page)}","${safeCsv(r.hari)}","${safeCsv(
-      r.tanggal
-    )}","${safeCsv(r.time)}","${safeCsv(r.sport)}","${safeCsv(r.competition)}","${safeCsv(
-      r.title
-    )}","${safeCsv(r.home)}","${safeCsv(r.away)}","${safeCsv(r.channels?.[0])}","${safeCsv(
-      r.channels?.[1]
+    const ch = r.channels || [];
+    csv += `"${safeCsv(r.hari)}","${safeCsv(r.tanggal)}","${safeCsv(r.time)}","${safeCsv(
+      r.sport
+    )}","${safeCsv(r.competition)}","${safeCsv(r.title)}","${safeCsv(r.home)}","${safeCsv(
+      r.away
+    )}","${safeCsv(ch[0])}","${safeCsv(ch[1])}","${safeCsv(ch[2])}","${safeCsv(
+      ch[3]
+    )}","${safeCsv(ch[4])}","${safeCsv(ch[5])}","${safeCsv(ch[6])}","${safeCsv(
+      ch[7]
     )}","${safeCsv(r.event_url)}"\n`;
   }
 
