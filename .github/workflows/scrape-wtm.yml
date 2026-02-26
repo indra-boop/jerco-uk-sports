@@ -1,18 +1,9 @@
-name: Scrape WherestheMatch (WTM) -> HTML
+name: Scrape WTM (daily list)
 
 on:
-  workflow_dispatch:
-    inputs:
-      start:
-        description: "Start date (YYYYMMDD)"
-        required: true
-        default: "20260222"
-      end:
-        description: "End date (YYYYMMDD)"
-        required: true
-        default: "20260301"
   schedule:
-    - cron: "10 1 * * *"
+    - cron: "5 0 * * *"   # tiap hari 00:05 UTC (sesuaikan)
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,48 +13,67 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: true
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
       - name: Install deps
-        run: npm install 
+        run: npm ci
 
-      - name: Determine date range
-        id: range
+      - name: Build date list (next 7 days, WITA)
+        id: dates
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "start=${{ inputs.start }}" >> $GITHUB_OUTPUT
-            echo "end=${{ inputs.end }}" >> $GITHUB_OUTPUT
-          else
-            start=$(date -u +"%Y%m%d")
-            end=$(date -u -d "+7 days" +"%Y%m%d")
-            echo "start=$start" >> $GITHUB_OUTPUT
-            echo "end=$end" >> $GITHUB_OUTPUT
-          fi
+          node - <<'NODE'
+          function pad(n){return String(n).padStart(2,'0')}
+          function ymd(d){return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`}
 
-      - name: Run scraper
-        run: node src/scrape-wtm.js ${{ steps.range.outputs.start }} ${{ steps.range.outputs.end }}
+          // timezone WITA trick: ambil "tanggal lokal" via Intl
+          const tz = "Asia/Makassar";
+          const now = new Date();
+          const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year:"numeric", month:"2-digit", day:"2-digit"}).formatToParts(now);
+          const y = +parts.find(p=>p.type==="year").value;
+          const m = +parts.find(p=>p.type==="month").value;
+          const da = +parts.find(p=>p.type==="day").value;
+          const base = new Date(y, m-1, da);
+
+          const out = [];
+          for (let i=1; i<=7; i++){
+            const d = new Date(base);
+            d.setDate(d.getDate()+i);
+            out.push(ymd(d));
+          }
+          console.log(out.join(" "));
+          NODE
+
+      - name: Run scraper (list only)
+        run: |
+          DATES="$(node - <<'NODE'
+          function pad(n){return String(n).padStart(2,'0')}
+          function ymd(d){return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`}
+          const tz="Asia/Makassar";
+          const now=new Date();
+          const parts=new Intl.DateTimeFormat("en-CA",{timeZone:tz,year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);
+          const y=+parts.find(p=>p.type==="year").value;
+          const m=+parts.find(p=>p.type==="month").value;
+          const da=+parts.find(p=>p.type==="day").value;
+          const base=new Date(y,m-1,da);
+          const out=[];
+          for(let i=1;i<=7;i++){const d=new Date(base); d.setDate(d.getDate()+i); out.push(ymd(d));}
+          console.log(out.join(" "));
+          NODE)"
+          echo "DATES=$DATES"
+          node src/scrape-wtm.js $DATES
 
       - name: Commit output
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Tambahkan hasil scrape ke staging
-          git add results.csv out/*.html package-lock.json || true
-          
-          # Commit lokal hasil scrape
-          git commit -m "wtm: update data ${{ steps.range.outputs.start }}-${{ steps.range.outputs.end }} (423 items)" || echo "no changes"
-          
-          # Sinkronkan dengan server
-          git pull --rebase origin main
-          
-          # Push ke repositori
-          git push origin main
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add results.csv out || true
+          git commit -m "Update WTM results" || echo "No changes"
+          git push
