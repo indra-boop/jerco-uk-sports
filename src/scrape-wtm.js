@@ -1,4 +1,12 @@
-// scrape-wtm-daily.js
+// src/scrape-wtm.js
+// WTM DAILY SCRAPER (LIST ONLY)
+// Usage: node src/scrape-wtm.js 20260227 20260228 20260301 ...
+// - scrape per date (showdatestart=YYYYMMDD)
+// - brute-force paging: pagetotalhp0..N until stop
+// - save raw html to out/{date}/page-x.html
+// - dedup global (no double rows)
+// - output: results.csv
+
 const axios = require("axios");
 const cheerio = require("cheerio");
 const fs = require("fs");
@@ -135,7 +143,7 @@ function fingerprintOfFirstRow(rows) {
 }
 
 /* =========================
-   SCRAPE ONE DATE (BRUTE FORCE PAGING)
+   SCRAPE ONE DATE
    ========================= */
 async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
   const urlBase = buildDailyUrl(dateYYYYMMDD);
@@ -162,7 +170,6 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
 
   console.log(`Page 1 rows: ${p1.length} | unique total: ${allData.length}`);
 
-  // if page 1 empty, still keep html for audit and stop
   if (p1.length === 0) {
     console.log(`No rows on Page 1. Stop date ${dateYYYYMMDD}.`);
     return allData;
@@ -171,7 +178,6 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
   let lastFp = fingerprintOfFirstRow(p1);
   let pageNum = 2;
 
-  // brute force: try pagetotalhp0,1,2,... until it stops adding unique rows
   for (let idx = 0; idx <= maxPagingIndex; idx++) {
     const $prev = cheerio.load(currentHtml);
     const hidden = extractHiddenFields($prev);
@@ -212,7 +218,6 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
       break;
     }
 
-    // same page returned protection
     const fp = fingerprintOfFirstRow(pData);
     if (fp && fp === lastFp) {
       console.log(`Page ${pageNum}: duplicate page returned (same fingerprint) => stop.`);
@@ -227,7 +232,6 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
 
     console.log(`Page ${pageNum}: rows ${pData.length} | added unique: ${after - before}`);
 
-    // if no new unique rows, stop (server likely looping / same page)
     if (after === before) {
       console.log(`No unique added => stop paging.`);
       break;
@@ -242,32 +246,35 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
 }
 
 /* =========================
-   MAIN
+   MAIN (LIST ONLY)
    ========================= */
 async function main() {
-  const dates = process.argv.slice(2).filter(Boolean);
+  let dates = process.argv.slice(2).filter(Boolean);
 
   if (dates.length === 0) {
-    console.log(
-      "Usage:\n  node scrape-wtm-daily.js 20260227 20260228 20260301 20260302 20260303 20260304"
-    );
+    console.log("Usage: node src/scrape-wtm.js 20260227 20260228 20260301 ...");
     process.exit(1);
   }
+
+  // strict: list-only
+  dates = dates.filter((d) => {
+    if (!/^\d{8}$/.test(d)) {
+      console.log(`Skip invalid date: ${d} (must be YYYYMMDD)`);
+      return false;
+    }
+    return true;
+  });
 
   fs.mkdirSync("out", { recursive: true });
 
   let all = [];
   for (const d of dates) {
-    if (!/^\d{8}$/.test(d)) {
-      console.log(`Skip invalid date: ${d} (must be YYYYMMDD)`);
-      continue;
-    }
     const rows = await scrapeOneDate(d, { maxPagingIndex: 60, delayMs: 1200 });
     all.push(...rows);
     all = dedupRows(all);
   }
 
-  // CSV
+  // CSV output
   let csv =
     "source_date,page,hari,tanggal,time WITA,sport,competition,title,home,away,channel_1,channel_2,event_url\n";
 
