@@ -69,7 +69,7 @@ function isoToWitaPartsISO(isoZ) {
   return {
     hari,
     tanggal: `${dd}-${mm}-${yyyy}`,
-    time: `${HH.padStart(2, "0")}:${MM}`,
+    time: `${HH.padStart(2, "0")}:${MM.padStart(2, "0")}`,
     iso: dt.toISOString(),
   };
 }
