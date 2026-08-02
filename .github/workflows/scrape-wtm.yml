@@ -2,78 +2,67 @@ name: Scrape WTM (daily list)
 
 on:
   schedule:
-    - cron: "5 0 * * *"   # tiap hari 00:05 UTC (sesuaikan)
+    - cron: "5 0 * * *"      # 00:05 UTC = 08:05 WITA
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: scrape-wtm
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
       - name: Install deps
         run: npm ci
 
-      - name: Build date list (next 7 days, WITA)
+      - name: Build date list (H+0..H+7, WITA)
         id: dates
         run: |
-          node - <<'NODE'
-          function pad(n){return String(n).padStart(2,'0')}
-          function ymd(d){return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`}
+          DATES="$(node -e '
+            const pad = n => String(n).padStart(2, "0");
+            const p = new Intl.DateTimeFormat("en-CA", {
+              timeZone: "Asia/Makassar",
+              year: "numeric", month: "2-digit", day: "2-digit"
+            }).formatToParts(new Date());
+            const g = t => +p.find(x => x.type === t).value;
+            const base = new Date(g("year"), g("month") - 1, g("day"));
+            const out = [];
+            for (let i = 0; i <= 7; i++) {
+              const d = new Date(base);
+              d.setDate(d.getDate() + i);
+              out.push(`${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`);
+            }
+            console.log(out.join(" "));
+          ')"
+          echo "list=$DATES" >> "$GITHUB_OUTPUT"
+          echo "Dates: $DATES"
 
-          // timezone WITA trick: ambil "tanggal lokal" via Intl
-          const tz = "Asia/Makassar";
-          const now = new Date();
-          const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, year:"numeric", month:"2-digit", day:"2-digit"}).formatToParts(now);
-          const y = +parts.find(p=>p.type==="year").value;
-          const m = +parts.find(p=>p.type==="month").value;
-          const da = +parts.find(p=>p.type==="day").value;
-          const base = new Date(y, m-1, da);
+      - name: Run scraper
+        run: node src/scrape-wtm.js ${{ steps.dates.outputs.list }}
 
-          const out = [];
-          for (let i=1; i<=7; i++){
-            const d = new Date(base);
-            d.setDate(d.getDate()+i);
-            out.push(ymd(d));
-          }
-          console.log(out.join(" "));
-          NODE
-
-      - name: Run scraper (list only)
+      - name: Commit results.csv
         run: |
-          DATES="$(node - <<'NODE'
-          function pad(n){return String(n).padStart(2,'0')}
-          function ymd(d){return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`}
-          const tz="Asia/Makassar";
-          const now=new Date();
-          const parts=new Intl.DateTimeFormat("en-CA",{timeZone:tz,year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(now);
-          const y=+parts.find(p=>p.type==="year").value;
-          const m=+parts.find(p=>p.type==="month").value;
-          const da=+parts.find(p=>p.type==="day").value;
-          const base=new Date(y,m-1,da);
-          const out=[];
-          for(let i=1;i<=7;i++){const d=new Date(base); d.setDate(d.getDate()+i); out.push(ymd(d));}
-          console.log(out.join(" "));
-          NODE)"
-          echo "DATES=$DATES"
-          node src/scrape-wtm.js $DATES
-
-      - name: Commit output
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add results.csv out || true
-          git commit -m "Update WTM results" || echo "No changes"
+          if git diff --quiet -- results.csv; then
+            echo "No changes."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add results.csv
+          git commit -m "chore(data): update WTM results"
           git push
