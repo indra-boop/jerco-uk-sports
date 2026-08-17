@@ -1,0 +1,135 @@
+name: Apply GB Channel Prefix Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-country-prefix-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Patch scraper
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/scrape-wtm.js')
+          text = path.read_text(encoding='utf-8')
+
+          def replace_once(old, new, label):
+              global text
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected exactly 1 match, got {count}')
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              'const MIN_VALID_PCT = Number(process.env.MIN_VALID_PCT || 0.8);\n',
+              'const MIN_VALID_PCT = Number(process.env.MIN_VALID_PCT || 0.8);\nconst COUNTRY_CODE = "GB";\n',
+              'country constant',
+          )
+
+          replace_once(
+              """function titleCase(s) {
+            return s.replace(/-/g, " ").replace(/\\b\\w/g, (c) => c.toUpperCase());
+          }
+          """,
+              """function titleCase(s) {
+            return s.replace(/-/g, " ").replace(/\\b\\w/g, (c) => c.toUpperCase());
+          }
+
+          function prefixChannelName(name, countryCode = COUNTRY_CODE) {
+            const raw = String(name || "")
+              .replace(/^\\[[A-Z]{2}\\]\\s*/i, "")
+              .trim();
+            return raw ? `[${countryCode}] ${raw}` : "";
+          }
+          """,
+              'prefix helper',
+          )
+
+          replace_once(
+              '    channels = uniqKeepOrder(channels);\n',
+              '    channels = uniqKeepOrder(channels).map((name) => prefixChannelName(name));\n',
+              'channel enrichment',
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Validate syntax
+        run: node --check src/scrape-wtm.js
+
+      - name: Build WITA date list
+        id: dates
+        shell: bash
+        run: |
+          DATES="$(node -e '
+            const pad = n => String(n).padStart(2, "0");
+            const p = new Intl.DateTimeFormat("en-CA", {
+              timeZone: "Asia/Makassar",
+              year: "numeric", month: "2-digit", day: "2-digit"
+            }).formatToParts(new Date());
+            const g = t => +p.find(x => x.type === t).value;
+            const base = new Date(g("year"), g("month") - 1, g("day"));
+            const out = [];
+            for (let i = 0; i <= 7; i++) {
+              const d = new Date(base);
+              d.setDate(d.getDate() + i);
+              out.push(`${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`);
+            }
+            console.log(out.join(" "));
+          ')"
+          echo "list=$DATES" >> "$GITHUB_OUTPUT"
+
+      - name: Run scraper with GB-prefixed channels
+        run: node src/scrape-wtm.js ${{ steps.dates.outputs.list }}
+
+      - name: Verify result prefix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import csv
+          with open('results.csv', newline='', encoding='utf-8') as f:
+              rows = list(csv.DictReader(f))
+          channels = [row.get(f'channel_{i}', '') for row in rows for i in range(1, 9)]
+          channels = [c for c in channels if c]
+          if not channels:
+              raise SystemExit('No channels found in results.csv')
+          bad = [c for c in channels if not c.startswith('[GB] ')]
+          if bad:
+              raise SystemExit(f'Unprefixed channel found: {bad[:3]}')
+          print(f'GB prefix verified on {len(channels)} channel cells')
+          PY
+
+      - name: Commit implementation and verified output
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/scrape-wtm.js results.csv
+          git diff --cached --check
+          git commit -m 'feat: add GB country prefix to channels'
+          git push
