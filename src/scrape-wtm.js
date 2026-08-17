@@ -16,6 +16,7 @@ const { CookieJar } = require("tough-cookie");
 
 const SAVE_HTML = process.env.SAVE_HTML === "1";
 const MIN_VALID_PCT = Number(process.env.MIN_VALID_PCT || 0.8);
+const COUNTRY_CODE = "GB";
 
 /* =========================
    AXIOS CLIENT + COOKIE JAR
@@ -98,6 +99,13 @@ function uniqKeepOrder(arr) {
 
 function titleCase(s) {
   return s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function prefixChannelName(name, countryCode = COUNTRY_CODE) {
+  const raw = String(name || "")
+    .replace(/^\[[A-Z]{2}\]\s*/i, "")
+    .trim();
+  return raw ? `[${countryCode}] ${raw}` : "";
 }
 
 /* =========================
@@ -191,7 +199,7 @@ function parseWTMEvents($, pageNum, sourceDate) {
         )
         .get();
     }
-    channels = uniqKeepOrder(channels);
+    channels = uniqKeepOrder(channels).map((name) => prefixChannelName(name));
 
     // --- URL event
     let href =
