@@ -66,3 +66,16 @@ jobs:
           git add results.csv
           git commit -m "chore(data): update WTM results"
           git push
+
+      - name: Push schedule to aggregator
+        shell: bash
+        env:
+          DASHBOARD_INGEST_URL: https://schedule.jerconetwork.com/api/ingest/v2
+          DASHBOARD_INGEST_TOKEN: ${{ secrets.DASHBOARD_INGEST_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DASHBOARD_INGEST_TOKEN:-}" ]; then
+            echo "Missing required GitHub secret: DASHBOARD_INGEST_TOKEN" >&2
+            exit 1
+          fi
+          node scripts/push-ingest.mjs
