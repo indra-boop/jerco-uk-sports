@@ -73,6 +73,17 @@ function toRecords(rows) {
       if (value !== "") record[key] = value;
     });
 
+    // WTM can reuse the same event URL for a later occurrence. The aggregator
+    // keeps rows outside the incoming date window, so a URL-only key can clash
+    // with an older occurrence that is intentionally preserved.
+    if (record.event_url && record.tanggal && record["time WITA"]) {
+      record.source_key = [
+        record.event_url,
+        record.tanggal,
+        record["time WITA"],
+      ].join("|");
+    }
+
     if (Object.keys(record).length > 0) records.push(record);
   }
 
