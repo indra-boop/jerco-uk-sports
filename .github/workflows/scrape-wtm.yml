@@ -30,7 +30,7 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      - name: Build date list (H+0..H+7, WITA)
+      - name: Build date list (H+0..H+2, WITA)
         id: dates
         run: |
           DATES="$(node -e '
@@ -42,7 +42,7 @@ jobs:
             const g = t => +p.find(x => x.type === t).value;
             const base = new Date(g("year"), g("month") - 1, g("day"));
             const out = [];
-            for (let i = 0; i <= 7; i++) {
+            for (let i = 0; i <= 2; i++) {
               const d = new Date(base);
               d.setDate(d.getDate() + i);
               out.push(`${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}`);
