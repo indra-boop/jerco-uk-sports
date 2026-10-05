@@ -13,6 +13,7 @@ const fs = require("fs");
 const path = require("path");
 const { wrapper } = require("axios-cookiejar-support");
 const { CookieJar } = require("tough-cookie");
+const { isoToWitaPartsISO } = require("./wita-time");
 
 const SAVE_HTML = process.env.SAVE_HTML === "1";
 const MIN_VALID_PCT = Number(process.env.MIN_VALID_PCT || 0.8);
@@ -51,28 +52,6 @@ function safeCsv(v) {
 
 function buildDailyUrl(dateYYYYMMDD) {
   return `https://www.wheresthematch.com/live-sport-on-tv/?showdatestart=${dateYYYYMMDD}`;
-}
-
-// ISO dgn offset UK (+01:00 BST / +00:00 GMT) -> WITA
-function isoToWitaPartsISO(isoZ) {
-  if (!isoZ) return null;
-  const dt = new Date(isoZ);
-  if (isNaN(dt.getTime())) return null;
-
-  const o = { timeZone: "Asia/Makassar", hour12: false };
-  const yyyy = new Intl.DateTimeFormat("en", { ...o, year: "numeric" }).format(dt);
-  const mm = new Intl.DateTimeFormat("en", { ...o, month: "2-digit" }).format(dt);
-  const dd = new Intl.DateTimeFormat("en", { ...o, day: "2-digit" }).format(dt);
-  const HH = new Intl.DateTimeFormat("en", { ...o, hour: "2-digit" }).format(dt);
-  const MM = new Intl.DateTimeFormat("en", { ...o, minute: "2-digit" }).format(dt);
-  const hari = new Intl.DateTimeFormat("id-ID", { ...o, weekday: "long" }).format(dt);
-
-  return {
-    hari,
-    tanggal: `${dd}-${mm}-${yyyy}`,
-    time: `${HH.padStart(2, "0")}:${MM.padStart(2, "0")}`,
-    iso: dt.toISOString(),
-  };
 }
 
 function extractHiddenFields($) {
