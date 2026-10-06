@@ -4,6 +4,9 @@
 // Env opsional:
 //   SAVE_HTML=1     -> simpan HTML mentah ke out/ (default: tidak simpan)
 //   MIN_VALID_PCT   -> ambang guard, default 0.8
+//   WTM_RETRY_MAX   -> total percobaan per request saat ECONNRESET/ETIMEDOUT/5xx, default 5
+//   WTM_RETRY_BASE_MS -> backoff awal (eksponensial + jitter), default 2000
+//   WTM_DATE_DELAY_MS -> jeda antar tanggal, default 3000
 // Output: results.csv
 //   hari,tanggal,time WITA,sport,competition,title,home,away,channel_1..8,event_url
 
@@ -22,21 +25,87 @@ const COUNTRY_CODE = "GB";
 /* =========================
    AXIOS CLIENT + COOKIE JAR
    ========================= */
+const BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  Accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
+  "Cache-Control": "no-cache",
+  Pragma: "no-cache",
+  "Upgrade-Insecure-Requests": "1",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+};
+
 const jar = new CookieJar();
 const client = wrapper(
   axios.create({
     jar,
     withCredentials: true,
     timeout: 60000,
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
+    headers: BROWSER_HEADERS,
   })
 );
+
+/* =========================
+   RETRY (ECONNRESET dkk.)
+   ========================= */
+const RETRY_MAX = Number(process.env.WTM_RETRY_MAX || 5); // total percobaan
+const RETRY_BASE_MS = Number(process.env.WTM_RETRY_BASE_MS || 2000);
+const DATE_DELAY_MS = Number(process.env.WTM_DATE_DELAY_MS || 3000);
+
+const RETRYABLE_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ECONNABORTED", // axios timeout
+  "EPIPE",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ERR_SOCKET_CONNECTION_TIMEOUT",
+]);
+const RETRYABLE_STATUS = new Set([408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 524]);
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function isRetryable(err) {
+  if (!err) return false;
+  if (err.code && RETRYABLE_CODES.has(err.code)) return true;
+  const cause = err.cause;
+  if (cause && cause.code && RETRYABLE_CODES.has(cause.code)) return true;
+  const status = err.response && err.response.status;
+  if (status && RETRYABLE_STATUS.has(status)) return true;
+  if (!err.response && /socket hang up|ECONNRESET|timeout/i.test(err.message || "")) return true;
+  return false;
+}
+
+async function withRetry(label, fn) {
+  let lastErr;
+  for (let attempt = 1; attempt <= RETRY_MAX; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const status = e.response ? ` HTTP ${e.response.status}` : "";
+      const code = e.code ? ` [${e.code}]` : "";
+      if (!isRetryable(e) || attempt === RETRY_MAX) {
+        console.log(`${label} gagal (percobaan ${attempt}/${RETRY_MAX})${code}${status}: ${e.message}`);
+        throw e;
+      }
+      const backoff = RETRY_BASE_MS * 2 ** (attempt - 1) + Math.floor(Math.random() * 1000);
+      console.log(
+        `${label} error (percobaan ${attempt}/${RETRY_MAX})${code}${status}: ${e.message} — retry dalam ${backoff}ms`
+      );
+      await sleep(backoff);
+    }
+  }
+  throw lastErr;
+}
 
 /* =========================
    HELPERS
@@ -247,7 +316,7 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
 
   let currentHtml = "";
   try {
-    const res1 = await client.get(urlBase);
+    const res1 = await withRetry(`GET ${dateYYYYMMDD}`, () => client.get(urlBase));
     currentHtml = res1.data;
   } catch (e) {
     console.log(`GET gagal untuk ${dateYYYYMMDD}: ${e.message}`);
@@ -283,15 +352,19 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
 
     let resNext;
     try {
-      resNext = await client.post(
-        "https://www.wheresthematch.com/live-sport-on-tv/?paging=true",
-        payload.toString(),
-        {
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            Referer: urlBase,
-          },
-        }
+      resNext = await withRetry(`POST ${dateYYYYMMDD} p${pageNum}`, () =>
+        client.post(
+          "https://www.wheresthematch.com/live-sport-on-tv/?paging=true",
+          payload.toString(),
+          {
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              Origin: "https://www.wheresthematch.com",
+              Referer: urlBase,
+              "Sec-Fetch-Site": "same-origin",
+            },
+          }
+        )
       );
     } catch (e) {
       console.log(`POST failed on idx ${idx}: ${e.message}`);
@@ -328,7 +401,7 @@ async function scrapeOneDate(dateYYYYMMDD, opts = {}) {
     }
 
     pageNum++;
-    await new Promise((r) => setTimeout(r, delayMs));
+    await sleep(delayMs);
   }
 
   console.log(`DATE ${dateYYYYMMDD} DONE. unique rows: ${allData.length}`);
@@ -357,7 +430,8 @@ async function main() {
   if (SAVE_HTML) fs.mkdirSync("out", { recursive: true });
 
   let all = [];
-  for (const d of dates) {
+  for (const [i, d] of dates.entries()) {
+    if (i > 0 && DATE_DELAY_MS > 0) await sleep(DATE_DELAY_MS);
     const rows = await scrapeOneDate(d, { maxPagingIndex: 60, delayMs: 1200 });
     all.push(...rows);
     all = dedupRows(all);
